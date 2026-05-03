@@ -1,4 +1,5 @@
 .env
+dataset/
 __pycache__/
 *.pyc
 *.pyo
