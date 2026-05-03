@@ -18,20 +18,39 @@ from transformers import (
     AutoTokenizer, AutoModelForSeq2SeqLM,
     Seq2SeqTrainer, Seq2SeqTrainingArguments,
     DataCollatorForSeq2Seq,
+    TrainerCallback, TrainerState, TrainerControl,
 )
 from rouge_score import rouge_scorer
 
-from src.utils import set_seed
+from src.utils import set_seed, get_logger
+
+
+class JsonlMetricsCallback(TrainerCallback):
+    """Appends eval metrics as JSON lines to <out_dir>/logs/metrics.jsonl."""
+    def __init__(self, log_path: Path):
+        self.log_path = log_path
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def on_evaluate(self, args, state: TrainerState, control: TrainerControl, metrics=None, **kwargs):
+        if metrics:
+            row = {"step": state.global_step, "epoch": state.epoch, **metrics}
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
 
 MODEL = "facebook/bart-base"
 OUT_DIR = Path("experiments/runs/e1_full_ft_bart_base")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = OUT_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def main():
+    log = get_logger("e1_full_ft", log_file=str(LOG_DIR / "train.log"))
+    log.info("Starting E1 — BART-base full fine-tuning (Saini et al. reproduction)")
     set_seed(42)
 
     tok = AutoTokenizer.from_pretrained(MODEL)
+    log.info("Tokenizer loaded. Loading dataset …")
     raw = load_dataset("json", data_files={
         "train": "data/processed/train.jsonl",
         "validation": "data/processed/val.jsonl",
@@ -46,7 +65,11 @@ def main():
         return m
 
     ds = raw.map(tokenize, batched=True, remove_columns=raw["train"].column_names)
+    log.info("Dataset tokenized. Train=%d  Val=%d  Test=%d",
+             len(ds["train"]), len(ds["validation"]), len(ds["test"]))
     model = AutoModelForSeq2SeqLM.from_pretrained(MODEL)
+    log.info("Model loaded: %s  params=%s",
+             MODEL, f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 
     scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
 
@@ -77,13 +100,14 @@ def main():
         evaluation_strategy="epoch",
         save_strategy="epoch",
         logging_steps=50,
+        logging_dir=str(LOG_DIR / "tb"),   # TensorBoard event files
         predict_with_generate=True,
         generation_num_beams=4,
         generation_max_length=64,
         load_best_model_at_end=True,
         metric_for_best_model="rougeL",
         greater_is_better=True,
-        save_total_limit=2,
+        save_total_limit=3,               # keep best + last 2 checkpoints
         report_to="none",
         seed=42,
     )
@@ -98,20 +122,30 @@ def main():
         tokenizer=tok,
         data_collator=collator,
         compute_metrics=compute,
+        callbacks=[JsonlMetricsCallback(LOG_DIR / "metrics.jsonl")],
     )
 
+    log.info("Trainer ready. Starting training …")
     trainer.train()
+    log.info("Training done. Saving best model to %s", OUT_DIR / "best")
     trainer.save_model(str(OUT_DIR / "best"))
     tok.save_pretrained(str(OUT_DIR / "best"))
 
+    log.info("Evaluating on test set …")
     test_metrics = trainer.evaluate(ds["test"], metric_key_prefix="test")
     with open(OUT_DIR / "test_metrics.json", "w") as f:
         json.dump(test_metrics, f, indent=2)
+    # also append to metrics log
+    with open(LOG_DIR / "metrics.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"split": "test", **test_metrics}) + "\n")
 
+    log.info("=== E1 results ===\n%s", json.dumps(test_metrics, indent=2))
     print("\n=== E1 (BART-base full FT, Saini reproduction) ===")
     print(json.dumps(test_metrics, indent=2))
     print("\nSaini et al. (2025) reported: rouge1=0.2803, rouge2=0.1685, rougeL=0.2549")
     print("Pipeline is OK if our test/rougeL is within ~0.02 of 0.2549.\n")
+    print(f"Full training log → {LOG_DIR / 'train.log'}")
+    print(f"Per-epoch metrics  → {LOG_DIR / 'metrics.jsonl'}")
 
 
 if __name__ == "__main__":

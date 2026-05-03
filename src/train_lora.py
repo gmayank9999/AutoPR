@@ -23,11 +23,25 @@ from transformers import (
     AutoTokenizer, AutoModelForSeq2SeqLM,
     Seq2SeqTrainer, Seq2SeqTrainingArguments,
     DataCollatorForSeq2Seq,
+    TrainerCallback, TrainerState, TrainerControl,
 )
 from peft import LoraConfig, get_peft_model, TaskType
 from rouge_score import rouge_scorer
 
-from src.utils import set_seed
+from src.utils import set_seed, get_logger
+
+
+class JsonlMetricsCallback(TrainerCallback):
+    """Writes per-evaluation metrics as JSON lines to a log file."""
+    def __init__(self, log_path: Path):
+        self.log_path = log_path
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def on_evaluate(self, args, state: TrainerState, control: TrainerControl, metrics=None, **kwargs):
+        if metrics:
+            row = {"step": state.global_step, "epoch": state.epoch, **metrics}
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
 
 
 def load_cfg(path):
@@ -110,14 +124,23 @@ def main():
 
     set_seed(cfg["train"]["seed"])
 
-    tok = AutoTokenizer.from_pretrained(cfg["model"]["name"])
-    ds = build_ds(cfg, tok)
-    model = build_model(cfg)
-
     short = cfg["model"]["name"].split("/")[-1]
     run_name = f"lora_{short}"
     out_dir = Path(cfg["paths"]["out_dir"]) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log = get_logger(run_name, log_file=str(log_dir / "train.log"))
+    log.info("Starting %s  model=%s", run_name, cfg["model"]["name"])
+
+    tok = AutoTokenizer.from_pretrained(cfg["model"]["name"])
+    log.info("Tokenizer loaded. Building dataset …")
+    ds = build_ds(cfg, tok)
+    log.info("Dataset ready. Train=%d  Val=%d  Test=%d",
+             len(ds["train"]), len(ds["validation"]), len(ds["test"]))
+    model = build_model(cfg)
+    log.info("Model ready. Starting training …")
 
     args_tr = Seq2SeqTrainingArguments(
         output_dir=str(out_dir),
@@ -131,6 +154,7 @@ def main():
         evaluation_strategy=cfg["train"]["eval_strategy"],
         save_strategy=cfg["train"]["save_strategy"],
         logging_steps=cfg["train"]["logging_steps"],
+        logging_dir=str(log_dir / "tb"),       # TensorBoard event files
         fp16=cfg["train"]["fp16"],
         gradient_checkpointing=cfg["train"]["gradient_checkpointing"],
         predict_with_generate=True,
@@ -139,7 +163,7 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="rougeL",
         greater_is_better=True,
-        save_total_limit=2,
+        save_total_limit=3,               # keep best + last 2 checkpoints
         report_to="none",
         seed=cfg["train"]["seed"],
     )
@@ -154,19 +178,27 @@ def main():
         tokenizer=tok,
         data_collator=collator,
         compute_metrics=make_metrics(tok),
+        callbacks=[JsonlMetricsCallback(log_dir / "metrics.jsonl")],
     )
 
     trainer.train()
+    log.info("Training done. Saving adapter to %s", out_dir / "best")
     trainer.save_model(str(out_dir / "best"))
     tok.save_pretrained(str(out_dir / "best"))
 
+    log.info("Evaluating on test set …")
     test_metrics = trainer.evaluate(ds["test"], metric_key_prefix="test")
     with open(out_dir / "test_metrics.json", "w") as f:
         json.dump(test_metrics, f, indent=2)
+    with open(log_dir / "metrics.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"split": "test", **test_metrics}) + "\n")
 
+    log.info("=== %s results ===\n%s", run_name, json.dumps(test_metrics, indent=2))
     print(f"\n=== LoRA fine-tuning of {cfg['model']['name']} done ===")
     print(json.dumps(test_metrics, indent=2))
-    print(f"Adapter saved to: {out_dir / 'best'}")
+    print(f"Adapter saved to  : {out_dir / 'best'}")
+    print(f"Training log      → {log_dir / 'train.log'}")
+    print(f"Per-epoch metrics → {log_dir / 'metrics.jsonl'}")
 
 
 if __name__ == "__main__":
