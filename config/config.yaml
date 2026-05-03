@@ -1,0 +1,50 @@
+# Paths
+paths:
+  train: data/processed/train.jsonl
+  val:   data/processed/val.jsonl
+  test:  data/processed/test.jsonl
+  out_dir: experiments/runs
+
+# Which base model to fine-tune (change this between LoRA experiments E2-E5)
+# Options:
+#   facebook/bart-base               (E2)
+#   Salesforce/codet5p-220m          (E3 — main result)
+#   google/flan-t5-base              (E4)
+#   t5-base                          (E5)
+model:
+  name: Salesforce/codet5p-220m
+  max_src_len: 512
+  max_tgt_len: 64
+
+# LoRA config (PEFT library)
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  bias: "none"
+  task_type: "SEQ_2_SEQ_LM"
+  # target_modules set automatically by train_lora.py based on backbone
+  # BART uses different projection names than T5/CodeT5+
+
+# Training
+train:
+  seed: 42
+  epochs: 5
+  per_device_batch: 16
+  grad_accum: 1
+  lr: 3.0e-4
+  warmup_ratio: 0.06
+  weight_decay: 0.0
+  eval_strategy: "epoch"
+  save_strategy: "epoch"
+  logging_steps: 50
+  fp16: true
+  gradient_checkpointing: false
+
+# Generation at eval and inference time
+generation:
+  num_beams: 4
+  max_new_tokens: 64
+  length_penalty: 1.0
+  early_stopping: true
+  no_repeat_ngram_size: 3
