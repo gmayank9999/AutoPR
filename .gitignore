@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+data/raw/*
+data/processed/*
+data/db/*
+experiments/runs/*
+experiments/results/*
+!**/.gitkeep
+.venv/
+.ipynb_checkpoints/
+.DS_Store
+*.egg-info/
+dist/
+build/
+*.log
