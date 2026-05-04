@@ -58,6 +58,23 @@ def get_target_modules(model_name: str):
     return ["q", "k", "v", "o"]
 
 
+def use_fp16(model_name: str) -> bool:
+    """T5-family models have known NaN loss issues with fp16; disable it."""
+    n = model_name.lower()
+    # BART and CodeT5+ are fine with fp16; plain T5 / FLAN-T5 are not
+    if "bart" in n or "codet5" in n:
+        return True
+    return False  # t5-base, flan-t5 → fp32
+
+
+def safe_lr(model_name: str, cfg_lr: float) -> float:
+    """T5-family needs a lower LR to avoid gradient explosion with LoRA."""
+    n = model_name.lower()
+    if "bart" in n or "codet5" in n:
+        return cfg_lr
+    return min(cfg_lr, 1e-4)  # cap at 1e-4 for T5/FLAN-T5
+
+
 def build_ds(cfg, tok):
     raw = load_dataset("json", data_files={
         "train": cfg["paths"]["train"],
@@ -148,14 +165,14 @@ def main():
         per_device_train_batch_size=cfg["train"]["per_device_batch"],
         per_device_eval_batch_size=cfg["train"]["per_device_batch"],
         gradient_accumulation_steps=cfg["train"]["grad_accum"],
-        learning_rate=cfg["train"]["lr"],
+        learning_rate=safe_lr(cfg["model"]["name"], cfg["train"]["lr"]),
         warmup_ratio=cfg["train"]["warmup_ratio"],
         weight_decay=cfg["train"]["weight_decay"],
         evaluation_strategy=cfg["train"]["eval_strategy"],
         save_strategy=cfg["train"]["save_strategy"],
         logging_steps=cfg["train"]["logging_steps"],
         logging_dir=str(log_dir / "tb"),       # TensorBoard event files
-        fp16=cfg["train"]["fp16"],
+        fp16=use_fp16(cfg["model"]["name"]),
         gradient_checkpointing=cfg["train"]["gradient_checkpointing"],
         predict_with_generate=True,
         generation_num_beams=cfg["generation"]["num_beams"],
